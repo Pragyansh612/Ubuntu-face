@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+env/
+.env/
+.venv/
+
+# Dataset & personal biometric data (never commit your face images)
+dataset/user/raw/
+dataset/
+
+# Generated model data (regenerate with scripts)
+data/embeddings.npy
+data/hand_landmarker.task
+
+# InsightFace downloaded models
+~/.insightface/
+
+# PAM backup (machine-specific)
+*.bak
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Test artifacts
+test_gesture.py
+test_gesture_debug.py

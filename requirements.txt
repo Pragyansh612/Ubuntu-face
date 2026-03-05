@@ -1,0 +1,10 @@
+opencv-python
+mediapipe
+numpy
+insightface
+onnxruntime
+facenet-pytorch
+torch
+torchvision
+Pillow
+scipy
