@@ -1,44 +1,72 @@
 """
 auth_controller.py
 
-Orchestrates face authentication and gesture authentication.
-
-Logic:
-    1. Open webcam
-    2. For SCAN_DURATION seconds, collect frames
-    3. Try face recognition on every frame
-    4. If face passes  → return True immediately
-    5. If no face pass → try gesture on accumulated frames
-    6. If gesture passes → return True
-    7. Else → return False (fall through to password)
-
-Returns exit code:
-    0 → authentication succeeded
-    1 → authentication failed
+Checks /tmp/face_auth_cache first (written by pre_scan.py at GDM startup).
+If cache is fresh (< 30 seconds old) → use it instantly.
+If cache is stale or missing → fall back to live scan.
 """
 
 import sys
 import time
+import os
 import cv2
 import numpy as np
 
-# Append project root so auth/ imports work when called from pam/
-import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from auth.face_auth    import FaceAuthenticator
 from auth.gesture_auth import GestureAuthenticator
 
-# ── Configuration ────────────────────────────────────────────────────────────
-SCAN_DURATION   = 3       # seconds to scan before giving up
-CAMERA_INDEX    = 0       # /dev/video0
+# ── Configuration ─────────────────────────────────────────────────────────────
+SCAN_DURATION   = 3
+CAMERA_INDEX    = 0
 FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
-DET_SIZE        = (320, 320)   # InsightFace detection resolution
+DET_SIZE        = (320, 320)
+CACHE_FILE      = "/tmp/face_auth_cache"
+CACHE_MAX_AGE   = 30    # seconds — discard cache older than this
+
+
+def _read_cache() -> bool | None:
+    """
+    Read cached result from pre_scan.py.
+
+    Returns:
+        True  → cached SUCCESS and it's fresh
+        False → cached FAIL and it's fresh
+        None  → no cache, cache too old, or unreadable
+    """
+    try:
+        if not os.path.isfile(CACHE_FILE):
+            return None
+
+        with open(CACHE_FILE, "r") as f:
+            line = f.read().strip()
+
+        parts = line.split()
+        if len(parts) != 2:
+            return None
+
+        result, timestamp = parts[0], int(parts[1])
+        age = time.time() - timestamp
+
+        if age > CACHE_MAX_AGE:
+            print(f"[AuthController] Cache expired ({age:.1f}s old) — running live scan.")
+            os.remove(CACHE_FILE)
+            return None
+
+        print(f"[AuthController] Cache hit: {result} ({age:.1f}s old)")
+
+        # Consume the cache so it can't be reused for a second login
+        os.remove(CACHE_FILE)
+        return result == "SUCCESS"
+
+    except Exception as e:
+        print(f"[AuthController] Cache read error: {e}")
+        return None
 
 
 def _load_insightface():
-    """Load InsightFace model (CPU). Returns app or None on failure."""
     try:
         from insightface.app import FaceAnalysis
         app = FaceAnalysis(
@@ -52,25 +80,20 @@ def _load_insightface():
         return None
 
 
-def authenticate() -> bool:
-    """
-    Run biometric authentication.
-    Returns True on success, False on failure.
-    """
-    print("[AuthController] Starting biometric authentication…")
+def _live_scan() -> bool:
+    """Full live scan — used when cache is missing or stale."""
+    print("[AuthController] Running live biometric scan…")
 
-    # ── Initialise models ────────────────────────────────────────────────────
     face_app = _load_insightface()
 
     try:
-        face_auth    = FaceAuthenticator()
+        face_auth = FaceAuthenticator()
     except FileNotFoundError as exc:
         print(f"[AuthController] {exc}")
         face_auth = None
 
     gesture_auth = GestureAuthenticator()
 
-    # ── Open camera ──────────────────────────────────────────────────────────
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
         print("[AuthController] ERROR: Cannot open webcam.")
@@ -80,22 +103,19 @@ def authenticate() -> bool:
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
-    start       = time.time()
-    face_passed = False
-    gesture_frames_rgb = []   # collect frames for gesture evaluation
+    start              = time.time()
+    face_passed        = False
+    gesture_frames_rgb = []
 
-    # ── Scan loop ─────────────────────────────────────────────────────────────
     try:
         while (time.time() - start) < SCAN_DURATION:
             ret, frame = cap.read()
             if not ret:
                 continue
 
-            # ── Face authentication ──────────────────────────────────────────
-            if face_app is not None and face_auth is not None and not face_passed:
+            if face_app and face_auth and not face_passed:
                 faces = face_app.get(frame)
                 if faces:
-                    # Use largest face
                     face = max(
                         faces,
                         key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
@@ -104,9 +124,8 @@ def authenticate() -> bool:
                     if matched:
                         print("[AuthController] Face authentication PASSED.")
                         face_passed = True
-                        break   # success — stop scanning immediately
+                        break
 
-            # Collect RGB frame for gesture check
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             gesture_frames_rgb.append(frame_rgb)
 
@@ -118,7 +137,6 @@ def authenticate() -> bool:
         gesture_auth.close()
         return True
 
-    # ── Gesture authentication ────────────────────────────────────────────────
     print("[AuthController] Face not matched. Checking gesture…")
     for frame_rgb in gesture_frames_rgb:
         if gesture_auth.check_gesture(frame_rgb):
@@ -129,6 +147,17 @@ def authenticate() -> bool:
     gesture_auth.close()
     print("[AuthController] Both biometric methods FAILED.")
     return False
+
+
+def authenticate() -> bool:
+    # Try cache first
+    cached = _read_cache()
+    if cached is not None:
+        print(f"[AuthController] Using cached result: {'PASS' if cached else 'FAIL'}")
+        return cached
+
+    # Fall back to live scan
+    return _live_scan()
 
 
 if __name__ == "__main__":
